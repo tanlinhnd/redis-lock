@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/go-redis/redis"
@@ -41,7 +40,7 @@ type Locker struct {
 	opts   Options
 
 	token string
-	mutex sync.Mutex
+	mutex lockfree
 }
 
 // Run runs a callback handler with a Redis lock. It may return ErrLockNotObtained
@@ -98,21 +97,25 @@ func (l *Locker) IsLocked() bool {
 	return locked
 }
 
-// Lock applies the lock, don't forget to defer the Unlock() function to release the lock after usage.
+// Lock applies the lock, don't forget to call Unlock() function to release the lock after usage.
 func (l *Locker) Lock() (bool, error) {
 	return l.LockWithContext(emptyCtx)
 }
 
 // LockWithContext is like Lock but allows to pass an additional context which allows cancelling
 // lock attempts prematurely.
-func (l *Locker) LockWithContext(ctx context.Context) (bool, error) {
+func (l *Locker) LockWithContext(ctx context.Context) (r bool, e error) {
 	l.mutex.Lock()
-	defer l.mutex.Unlock()
 
 	if l.token != "" {
-		return l.refresh(ctx)
+		r, e = l.refresh(ctx)
+		l.mutex.Unlock()
+		return
 	}
-	return l.create(ctx)
+
+	r, e = l.create(ctx)
+	l.mutex.Unlock()
+	return
 }
 
 // Unlock releases the lock
@@ -145,25 +148,36 @@ func (l *Locker) create(ctx context.Context) (bool, error) {
 		// Try to obtain a lock
 		ok, err := l.obtain(token)
 		if err != nil {
+			if retryDelay != nil {
+				retryDelay.Stop()
+			}
 			return false, err
 		} else if ok {
 			l.token = token
+			if retryDelay != nil {
+				retryDelay.Stop()
+			}
 			return true, nil
 		}
 
 		if attempts--; attempts <= 0 {
+			if retryDelay != nil {
+				retryDelay.Stop()
+			}
 			return false, nil
 		}
 
 		if retryDelay == nil {
 			retryDelay = time.NewTimer(l.opts.RetryDelay)
-			defer retryDelay.Stop()
 		} else {
 			retryDelay.Reset(l.opts.RetryDelay)
 		}
 
 		select {
 		case <-ctx.Done():
+			if retryDelay != nil {
+				retryDelay.Stop()
+			}
 			return false, ctx.Err()
 		case <-retryDelay.C:
 		}
@@ -190,17 +204,18 @@ func (l *Locker) obtain(token string) (bool, error) {
 }
 
 func (l *Locker) release() error {
-	defer l.reset()
-
 	res, err := luaRelease.Run(l.client, []string{l.key}, l.token).Result()
 	if err == redis.Nil {
+		l.reset()
 		return ErrLockUnlockFailed
 	}
 
 	if i, ok := res.(int64); !ok || i != 1 {
+		l.reset()
 		return ErrLockUnlockFailed
 	}
 
+	l.reset()
 	return err
 }
 
