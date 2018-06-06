@@ -85,13 +85,17 @@ func New(client RedisClient, key string, opts *Options) *Locker {
 	return &Locker{client: client, key: key, opts: o}
 }
 
-// Lock applies the lock, don't forget to call Unlock() function to release the lock after usage.
+// Lock applies the lock.
+// If error (lock not obtain or something else), don't call Unlock(). 
+// If no error, don't forget to call Unlock() function to release the lock after usage.
 func (l *Locker) Lock() error {
 	return l.LockWithContext(emptyCtx)
 }
 
 // LockWithContext is like Lock but allows to pass an additional context which allows cancelling
 // lock attempts prematurely.
+// If error (lock not obtain or something else), don't call Unlock(). 
+// If no error, don't forget to call Unlock() function to release the lock after usage.
 func (l *Locker) LockWithContext(ctx context.Context) (e error) {
 	l.mutex.Lock()
 

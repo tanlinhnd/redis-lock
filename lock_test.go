@@ -2,7 +2,6 @@ package lock
 
 import (
 	"fmt"
-	"math/rand"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -38,7 +37,6 @@ var _ = Describe("Locker", func() {
 
 	BeforeEach(func() {
 		subject = newLock()
-		Expect(subject.IsLocked()).To(BeFalse())
 	})
 
 	AfterEach(func() {
@@ -72,23 +70,25 @@ var _ = Describe("Locker", func() {
 	})
 
 	It("should obtain fresh locks", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
+		Expect(subject.Lock()).To(BeNil())
 
 		Expect(redisClient.Get(testRedisKey).Result()).To(HaveLen(24 + len(subject.opts.TokenPrefix)))
 		Expect(getTTL()).To(BeNumerically("~", time.Second, 10*time.Millisecond))
+
+		Expect(subject.Unlock()).To(BeNil())
 	})
 
 	It("should retry if enabled", func() {
 		Expect(redisClient.Set(testRedisKey, "ABCD", 0).Err()).NotTo(HaveOccurred())
 		Expect(redisClient.PExpire(testRedisKey, 30*time.Millisecond).Err()).NotTo(HaveOccurred())
 
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
+		Expect(subject.Lock()).To(BeNil())
 
 		Expect(redisClient.Get(testRedisKey).Result()).To(Equal(subject.token))
 		Expect(subject.opts.TokenPrefix).To(Equal(subject.token[:len(subject.token)-24]))
 		Expect(getTTL()).To(BeNumerically("~", time.Second, 10*time.Millisecond))
+
+		Expect(subject.Unlock()).To(BeNil())
 	})
 
 	It("should not retry if not enabled", func() {
@@ -96,8 +96,7 @@ var _ = Describe("Locker", func() {
 		Expect(redisClient.PExpire(testRedisKey, 150*time.Millisecond).Err()).NotTo(HaveOccurred())
 		subject.opts.RetryCount = 0
 
-		Expect(subject.Lock()).To(BeFalse())
-		Expect(subject.IsLocked()).To(BeFalse())
+		Expect(subject.Lock()).ToNot(BeNil())
 		Expect(getTTL()).To(BeNumerically("~", 150*time.Millisecond, 10*time.Millisecond))
 	})
 
@@ -105,104 +104,20 @@ var _ = Describe("Locker", func() {
 		Expect(redisClient.Set(testRedisKey, "ABCD", 0).Err()).NotTo(HaveOccurred())
 		Expect(redisClient.PExpire(testRedisKey, 150*time.Millisecond).Err()).NotTo(HaveOccurred())
 
-		Expect(subject.Lock()).To(BeFalse())
-		Expect(subject.IsLocked()).To(BeFalse())
+		Expect(subject.Lock()).ToNot(BeNil())
 		Expect(subject.token).To(Equal(""))
 
 		Expect(redisClient.Get(testRedisKey).Result()).To(Equal("ABCD"))
 		Expect(getTTL()).To(BeNumerically("~", 45*time.Millisecond, 20*time.Millisecond))
 	})
 
-	It("should release own locks", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-
-		Expect(subject.Unlock()).NotTo(HaveOccurred())
-		Expect(subject.token).To(Equal(""))
-		Expect(subject.IsLocked()).To(BeFalse())
-		Expect(redisClient.Get(testRedisKey).Err()).To(Equal(redis.Nil))
-	})
-
 	It("should failure on release expired lock", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
+		Expect(subject.Lock()).To(BeNil())
 
 		time.Sleep(subject.opts.LockTimeout * 2)
 
 		err := subject.Unlock()
 		Expect(err).To(Equal(ErrLockUnlockFailed))
-	})
-
-	It("should not release someone else's locks", func() {
-		Expect(redisClient.Set(testRedisKey, "ABCD", 0).Err()).NotTo(HaveOccurred())
-		Expect(subject.IsLocked()).To(BeFalse())
-
-		err := subject.Unlock()
-		Expect(err).To(Equal(ErrLockUnlockFailed))
-		Expect(subject.token).To(Equal(""))
-		Expect(subject.IsLocked()).To(BeFalse())
-		Expect(redisClient.Get(testRedisKey).Val()).To(Equal("ABCD"))
-	})
-
-	It("should refresh locks", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-
-		time.Sleep(50 * time.Millisecond)
-		Expect(getTTL()).To(BeNumerically("~", 950*time.Millisecond, 10*time.Millisecond))
-
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-		Expect(getTTL()).To(BeNumerically("~", time.Second, 10*time.Millisecond))
-	})
-
-	It("should re-create expired locks on refresh", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-		token := subject.token
-
-		Expect(redisClient.Del(testRedisKey).Err()).NotTo(HaveOccurred())
-
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-		Expect(subject.token).NotTo(Equal(token))
-		Expect(getTTL()).To(BeNumerically("~", time.Second, 10*time.Millisecond))
-	})
-
-	It("should not re-capture expired locks acquiredby someone else", func() {
-		Expect(subject.Lock()).To(BeTrue())
-		Expect(subject.IsLocked()).To(BeTrue())
-		Expect(redisClient.Set(testRedisKey, "ABCD", 0).Err()).NotTo(HaveOccurred())
-
-		Expect(subject.Lock()).To(BeFalse())
-		Expect(subject.IsLocked()).To(BeFalse())
-	})
-
-	It("should prevent multiple locks (fuzzing)", func() {
-		res := int32(0)
-		wg := new(sync.WaitGroup)
-		for i := 0; i < 1000; i++ {
-			wg.Add(1)
-			go func() {
-				defer GinkgoRecover()
-				defer wg.Done()
-
-				locker := newLock()
-				wait := rand.Int63n(int64(50 * time.Millisecond))
-				time.Sleep(time.Duration(wait))
-
-				ok, err := locker.Lock()
-				if err != nil {
-					atomic.AddInt32(&res, 100)
-					return
-				} else if !ok {
-					return
-				}
-				atomic.AddInt32(&res, 1)
-			}()
-		}
-		wg.Wait()
-		Expect(res).To(Equal(int32(1)))
 	})
 
 	It("should error when lock time exceeded while running handler", func() {
@@ -266,7 +181,6 @@ var _ = Describe("Locker", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(res).To(Equal(int32(1)))
 	})
-
 })
 
 // --------------------------------------------------------------------
