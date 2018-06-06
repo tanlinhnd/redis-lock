@@ -99,18 +99,25 @@ func (l *Locker) Lock() error {
 func (l *Locker) LockWithContext(ctx context.Context) (e error) {
 	l.mutex.Lock()
 
-	if l.token != "" {
-		if e = l.refresh(ctx); e != nil {
-			l.mutex.Unlock()
-		}
-		return
-	}
-
 	// try to create lock
 	if e = l.create(ctx); e != nil {
 		l.mutex.Unlock()
 	}
+	
 	return
+}
+
+// Refresh lock, extend ttl.
+// This function is not thread safe. Only call it when lock is granted.
+func (l *Locker) Refresh(ctx context.Context) (err error) {
+	ttl := strconv.FormatInt(int64(l.opts.LockTimeout/time.Millisecond), 10)
+	status, err := luaRefresh.Run(l.client, []string{l.key}, l.token, ttl).Result()
+	if err != nil {
+		return
+	} else if status == int64(1) {
+		return nil
+	}
+	return l.create(ctx)
 }
 
 // Unlock releases the lock
@@ -176,17 +183,6 @@ func (l *Locker) create(ctx context.Context) error {
 		case <-retryDelay.C:
 		}
 	}
-}
-
-func (l *Locker) refresh(ctx context.Context) (err error) {
-	ttl := strconv.FormatInt(int64(l.opts.LockTimeout/time.Millisecond), 10)
-	status, err := luaRefresh.Run(l.client, []string{l.key}, l.token, ttl).Result()
-	if err != nil {
-		return
-	} else if status == int64(1) {
-		return nil
-	}
-	return l.create(ctx)
 }
 
 func (l *Locker) obtain(token string) (bool, error) {
