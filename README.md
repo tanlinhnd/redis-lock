@@ -76,7 +76,7 @@ func main() {
 	defer client.Close()
 
 	// Create a new lock with default settings
-	locker := dlock.New(client, "lock.foo", nil)
+	locker := lock.New(client, "lock.foo", nil)
 
 	// warmup connection to redis
 	if err := locker.Lock(); err == nil {
